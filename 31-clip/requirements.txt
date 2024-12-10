@@ -1,0 +1,9 @@
+torch
+timm 
+transformers
+matplotlib
+opencv-python
+pytest
+albumentations
+pillow
+numpy
