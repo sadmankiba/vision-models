@@ -29,7 +29,8 @@ from libs import (
     DDPM,
     save_checkpoint,
     ModelEMA,
-    AverageMeter
+    AverageMeter, 
+    get_fid_score
 )
 
 
@@ -58,6 +59,7 @@ def main(args):
         )
     if not os.path.exists(ckpt_folder):
         os.mkdir(ckpt_folder)
+    
     # tensorboard writer
     tb_writer = SummaryWriter(os.path.join(ckpt_folder, "logs"))
 
@@ -68,11 +70,17 @@ def main(args):
         cfg["dataset"]["split"],
         cfg["dataset"]["data_folder"],
     )
+    test_dataset, _, _ = build_dataset(
+        cfg["dataset"]["name"],
+        "test",
+        cfg["dataset"]["data_folder"],
+    )
     cfg["model"]["num_classes"] = num_classes
     cfg["model"]["img_shape"] = img_shape
     pprint(cfg)
     # data loaders
     train_loader = build_dataloader(train_dataset, **cfg["loader"])
+    test_loader = build_dataloader(test_dataset, **cfg["loader"])
 
     """3. create model and optimizer"""
     # model
@@ -230,13 +238,56 @@ def main(args):
                 # yet eventually stablize samples during late stage of training
                 imgs = model_ema.module.p_sample_loop(sample_labels)
                 all_imgs.append(imgs)
-
+            
             all_imgs = torch.cat(all_imgs, dim=0)
             save_image(
                 all_imgs,
                 os.path.join(ckpt_folder, 'sample-{:d}.png'.format(epoch)),
                 nrow=cfg["model"]["num_classes"]
             )
+            
+            # Calculate FID score
+            if not args.calc_fid_score:
+                continue 
+            
+            ## Save generated samples
+            os.makedirs(os.path.join(ckpt_folder, f"samples-{epoch}"), exist_ok=True)
+            for idx, imgs in enumerate(all_imgs):
+                for label, img in enumerate(imgs):
+                    save_image(
+                        img,
+                        os.path.join(
+                            ckpt_folder, f"samples-{epoch}", f"sample-{label}-{idx}.png"
+                        ),
+                        nrow=1,
+                    )
+            
+            ## Save equal number of real samples
+            real_imgs = []
+            for iter_idx, batch in enumerate(test_loader):
+                img, label = batch
+                real_imgs.append(img)
+                if iter_idx * cfg["loader"]["batch_size"] >= len(all_imgs) - 1:
+                    break
+            
+            real_imgs = real_imgs[:len(all_imgs)]
+            
+            if not os.path.exists(os.path.join(ckpt_folder, "real-samples")):
+                os.makedirs(os.path.join(ckpt_folder, "real-samples"), exist_ok=True)
+                for idx, imgs in enumerate(real_imgs):
+                    for img_idx, img in enumerate(imgs):
+                        save_image(
+                            img,
+                            os.path.join(
+                                ckpt_folder, "real-samples", f"sample-{idx * len(imgs) + img_idx}.png"
+                            ),
+                            nrow=1,
+                        )
+            
+            ## FID calculation         
+            score = get_fid_score(os.path.join(ckpt_folder, f"samples-{epoch}"), 
+                        os.path.join(ckpt_folder, f"real-samples"))
+            print("FID score: ", score)
 
     # wrap up
     tb_writer.close()
@@ -250,7 +301,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train DDPM for Image Generation"
     )
-    #parser.add_argument("config", metavar="DIR", help="path to a config file")
+    parser.add_argument("config", metavar="DIR", help="path to a config file")
     parser.add_argument(
         "-p",
         "--print-freq",
@@ -275,6 +326,11 @@ if __name__ == "__main__":
         metavar="PATH",
         help="path to a checkpoint (default: none)",
     )
+    parser.add_argument(
+        "--calc-fid-score",
+        action="store_true",
+        help="calculate FID score"
+    )
     args = parser.parse_args()
-    args.config = "./configs/afhq.yaml"
+    # args.config = "./configs/afhq.yaml"
     main(args)
